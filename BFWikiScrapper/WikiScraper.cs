@@ -7,10 +7,12 @@ public sealed class WikiScraper : IDisposable
 {
     private readonly IBrowsingContext _browsingContext;
     private readonly HttpClient _httpClient;
+    private readonly AnsiScraperLogger _logger;
     private readonly string _wikiBaseUrl;
 
-    public WikiScraper(string wikiBaseUrl = "https://bravefrontierglobal.fandom.com")
+    public WikiScraper(AnsiScraperLogger logger, string wikiBaseUrl = "https://bravefrontierglobal.fandom.com")
     {
+        _logger = logger;
         _wikiBaseUrl = wikiBaseUrl;
         _httpClient = new HttpClient(new SocketsHttpHandler
             {
@@ -31,35 +33,37 @@ public sealed class WikiScraper : IDisposable
         _browsingContext.Dispose();
     }
 
-    public async Task<List<UnitData>> ScrapeUnitsAsync(string unitListUrl = "/wiki/Unit_List", int maxConcurrency = 8, CancellationToken cancellationToken = default)
+    public async Task<List<UnitData>> ScrapeUnitsAsync(string unitListUrl = "/wiki/Unit_List", int maxConcurrency = 8, ScrapeProgress? progress = null, CancellationToken cancellationToken = default)
     {
-        // Phase 1: Discover all list pages (main + paginated)
         var listPageUrls = await DiscoverAllListPagesAsync(unitListUrl, cancellationToken);
-        Console.WriteLine($"Found {listPageUrls.Count} list pages to scrape");
+        progress?.IncrementPages();
 
-        // Phase 2: Extract unit URLs from all list pages concurrently
         var unitUrls = await ScrapeAllListPagesAsync(listPageUrls, maxConcurrency, cancellationToken);
-        Console.WriteLine($"Found {unitUrls.Count} unit pages to scrape");
-
-        // Phase 3: Scrape all unit pages
         var results = new List<UnitData>(unitUrls.Count);
+
         var semaphore = new SemaphoreSlim(maxConcurrency);
         var tasks = unitUrls.Select(async url =>
             {
                 await semaphore.WaitAsync(cancellationToken);
+                progress?.IncrementActive();
                 try
                 {
-                    return await ScrapeUnitPageAsync(url, cancellationToken);
+                    var data = await ScrapeUnitPageAsync(url, cancellationToken);
+                    if ( data is not null )
+                        progress?.IncrementUnits();
+                    else
+                        progress?.IncrementFailures();
+                    return data;
                 }
                 finally
                 {
+                    progress?.DecrementActive();
                     semaphore.Release();
                 }
             }
         );
 
-        var unitDataArray = await Task.WhenAll(tasks);
-        results.AddRange(unitDataArray.OfType<UnitData>());
+        results.AddRange((await Task.WhenAll(tasks)).OfType<UnitData>());
         return results;
     }
 
@@ -80,7 +84,7 @@ public sealed class WikiScraper : IDisposable
                                       .ToList();
 
         listPages.AddRange(paginationLinks);
-        Console.WriteLine($"Discovered {paginationLinks.Count} paginated list pages");
+        _logger.Info($"Discovered {paginationLinks.Count} paginated list pages");
 
         return listPages;
     }
@@ -105,7 +109,7 @@ public sealed class WikiScraper : IDisposable
                         }
                     }
 
-                    Console.WriteLine($"Extracted {urls.Count} units from {listPageUrl}");
+                    _logger.Info($"Extracted {urls.Count} units from {listPageUrl}");
                 }
                 finally
                 {
@@ -154,7 +158,7 @@ public sealed class WikiScraper : IDisposable
             var (unitId, unitDataId, rarity) = ExtractUnitIdsAndRarity(document, url);
             if ( string.IsNullOrEmpty(unitId) || string.IsNullOrEmpty(unitDataId) )
             {
-                Console.WriteLine($"Missing IDs for {url}");
+                _logger.Warn($"Missing IDs for {url}");
                 return null;
             }
 
@@ -165,17 +169,17 @@ public sealed class WikiScraper : IDisposable
         }
         catch ( HttpRequestException ex )
         {
-            Console.WriteLine($"Failed to fetch {url}: {ex.Message}");
+            _logger.Warn($"Failed to fetch {url}: {ex.Message}");
             return null;
         }
         catch ( Exception ex )
         {
-            Console.WriteLine($"Error scraping {url}: {ex.Message}");
+            _logger.Error($"Error scraping {url}: {ex.Message}");
             return null;
         }
     }
 
-    private static (string unitId, string unitDataId, string rarity) ExtractUnitIdsAndRarity(IDocument document, string url)
+    private (string unitId, string unitDataId, string rarity) ExtractUnitIdsAndRarity(IDocument document, string url)
     {
         var unitInfoBox = document.QuerySelector("div.unit-info.unit-box");
         if ( unitInfoBox != null )
@@ -207,11 +211,11 @@ public sealed class WikiScraper : IDisposable
             }
         }
 
-        Console.WriteLine($"Failed to extract unit IDs or rarity from {url}");
+        _logger.Warn($"Failed to extract unit IDs or rarity from {url}");
         return (string.Empty, string.Empty, string.Empty);
     }
 
-    private static ValueTask<string> ExtractSplashArtUrlAsync(IDocument document)
+    private ValueTask<string> ExtractSplashArtUrlAsync(IDocument document)
     {
         // Get all mw-file-description links and take the second one (index 1)
         var imageLinks = document.QuerySelectorAll("a.mw-file-description.image");
@@ -220,11 +224,11 @@ public sealed class WikiScraper : IDisposable
         {
             if ( imageLinks.Length >= 0 )
             {
-                Console.WriteLine("Failed to find image link");
+                _logger.Warn("Failed to find image link");
                 return ValueTask.FromResult(string.Empty);
             }
 
-            Console.WriteLine("Using Fallback element");
+            _logger.Info("Using Fallback element");
             var href = imageLinks[0].GetAttribute("href");
             return ValueTask.FromResult(string.IsNullOrEmpty(href) ? string.Empty : NormalizeUrl(href));
         }
