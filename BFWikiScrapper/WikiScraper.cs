@@ -1,5 +1,6 @@
 ﻿using AngleSharp;
 using AngleSharp.Dom;
+using Spectre.Console;
 
 namespace BFWikiScrapper;
 
@@ -33,38 +34,54 @@ public sealed class WikiScraper : IDisposable
         _browsingContext.Dispose();
     }
 
-    public async Task<List<UnitData>> ScrapeUnitsAsync(string unitListUrl = "/wiki/Unit_List", int maxConcurrency = 8, ScrapeProgress? progress = null, CancellationToken cancellationToken = default)
+    public async Task<(List<UnitData> Units, int PagesDiscovered, int FailedUnits)> ScrapeUnitsAsync(string unitListUrl = "/wiki/Unit_List", int maxConcurrency = 8, ProgressContext? progressCtx = null, CancellationToken cancellationToken = default)
     {
+        var discoverTask = progressCtx?.AddTask("[green]Discovered List-Pages[/]");
         var listPageUrls = await DiscoverAllListPagesAsync(unitListUrl, cancellationToken);
-        progress?.IncrementPages();
+        var pagesDiscovered = listPageUrls.Count;
+        discoverTask?.Value(100);
+        discoverTask?.StopTask();
 
-        var unitUrls = await ScrapeAllListPagesAsync(listPageUrls, maxConcurrency, cancellationToken);
+        var extractTask = progressCtx?.AddTask("[green]Extracted Unit URLs[/]", maxValue: pagesDiscovered);
+        var unitUrls = await ScrapeAllListPagesAsync(listPageUrls, maxConcurrency, extractTask, cancellationToken);
+
+        var failedUnits = 0;
+        var failedTask = progressCtx?.AddTask("[red]Failed Pages[/]", maxValue: unitUrls.Count);
+        var scrapeTask = progressCtx?.AddTask("[green]Scrapped Units[/]", maxValue: unitUrls.Count);
+
         var results = new List<UnitData>(unitUrls.Count);
-
         var semaphore = new SemaphoreSlim(maxConcurrency);
         var tasks = unitUrls.Select(async url =>
             {
                 await semaphore.WaitAsync(cancellationToken);
-                progress?.IncrementActive();
                 try
                 {
                     var data = await ScrapeUnitPageAsync(url, cancellationToken);
                     if ( data is not null )
-                        progress?.IncrementUnits();
+                    {
+                        scrapeTask?.Increment(1);
+                        return data;
+                    }
                     else
-                        progress?.IncrementFailures();
-                    return data;
+                    {
+                        failedTask?.Increment(1);
+                        Interlocked.Increment(ref failedUnits);
+                        return null;
+                    }
                 }
                 finally
                 {
-                    progress?.DecrementActive();
                     semaphore.Release();
                 }
             }
         );
 
         results.AddRange((await Task.WhenAll(tasks)).OfType<UnitData>());
-        return results;
+
+        scrapeTask?.StopTask();
+        failedTask?.StopTask();
+
+        return (results, pagesDiscovered, failedUnits);
     }
 
     private async Task<List<string>> DiscoverAllListPagesAsync(string initialListPagePath, CancellationToken cancellationToken)
@@ -72,29 +89,23 @@ public sealed class WikiScraper : IDisposable
         var fullUrl = _wikiBaseUrl + initialListPagePath;
         var html = await _httpClient.GetStringAsync(fullUrl, cancellationToken);
         var document = await _browsingContext.OpenAsync(req => req.Content(html), cancellationToken);
-
-        var listPages = new List<string> { fullUrl }; // Start with main page
-
-        // Find pagination links matching pattern: /wiki/Unit_List:100, /wiki/Unit_List:200, etc.
+        var listPages = new List<string> { fullUrl };
         var paginationLinks = document.QuerySelectorAll("a[href*='/wiki/Unit_List:']")
                                       .Select(a => a.GetAttribute("href"))
                                       .Where(href => !string.IsNullOrEmpty(href))
                                       .Select(href => href!.StartsWith("http") ? href : _wikiBaseUrl + href)
                                       .Distinct()
                                       .ToList();
-
         listPages.AddRange(paginationLinks);
         _logger.Info($"Discovered {paginationLinks.Count} paginated list pages");
-
         return listPages;
     }
 
-    private async Task<HashSet<string>> ScrapeAllListPagesAsync(List<string> listPageUrls, int maxConcurrency, CancellationToken cancellationToken)
+    private async Task<HashSet<string>> ScrapeAllListPagesAsync(List<string> listPageUrls, int maxConcurrency, ProgressTask? extractTask, CancellationToken cancellationToken)
     {
         var allUnitUrls = new HashSet<string>(5000);
         var semaphore = new SemaphoreSlim(maxConcurrency);
         var lockObj = new object();
-
         var tasks = listPageUrls.Select(async listPageUrl =>
             {
                 await semaphore.WaitAsync(cancellationToken);
@@ -110,15 +121,17 @@ public sealed class WikiScraper : IDisposable
                     }
 
                     _logger.Info($"Extracted {urls.Count} units from {listPageUrl}");
+                    return urls.Count;
                 }
                 finally
                 {
+                    extractTask?.Increment(1);
                     semaphore.Release();
                 }
             }
         );
-
         await Task.WhenAll(tasks);
+        extractTask?.StopTask();
         return allUnitUrls;
     }
 
@@ -126,7 +139,6 @@ public sealed class WikiScraper : IDisposable
     {
         var html = await _httpClient.GetStringAsync(listPageUrl, cancellationToken);
         var document = await _browsingContext.OpenAsync(req => req.Content(html), cancellationToken);
-
         var urls = new List<string>(1000);
         var links = document.QuerySelectorAll("table.wikitable a[href*='/wiki/']")
                             .Select(a => a.GetAttribute("href"))
@@ -136,9 +148,8 @@ public sealed class WikiScraper : IDisposable
                                            !href.Contains("Special:") &&
                                            !href.Contains("Template:") &&
                                            !href.Contains("Unit_List")
-                            ) // Exclude list pages themselves
+                            )
                             .Distinct();
-
         foreach ( var link in links )
         {
             var fullLink = link != null && link.StartsWith("http") ? link : _wikiBaseUrl + link;
@@ -192,7 +203,6 @@ public sealed class WikiScraper : IDisposable
                 var value = row.QuerySelector("td")?.TextContent.Trim();
                 if ( string.IsNullOrEmpty(header) || string.IsNullOrEmpty(value) )
                     continue;
-
                 switch ( header )
                 {
                     case "Unit No.":
@@ -217,12 +227,10 @@ public sealed class WikiScraper : IDisposable
 
     private ValueTask<string> ExtractSplashArtUrlAsync(IDocument document)
     {
-        // Get all mw-file-description links and take the second one (index 1)
         var imageLinks = document.QuerySelectorAll("a.mw-file-description.image");
-
         if ( imageLinks.Length < 2 )
         {
-            if ( imageLinks.Length >= 0 )
+            if ( imageLinks.Length > 0 )
             {
                 _logger.Warn("Failed to find image link");
                 return ValueTask.FromResult(string.Empty);
@@ -233,7 +241,6 @@ public sealed class WikiScraper : IDisposable
             return ValueTask.FromResult(string.IsNullOrEmpty(href) ? string.Empty : NormalizeUrl(href));
         }
 
-        // Take the second link (index 1)
         var secondLink = imageLinks[1];
         var secondHref = secondLink.GetAttribute("href");
         return ValueTask.FromResult(string.IsNullOrEmpty(secondHref) ? string.Empty : NormalizeUrl(secondHref));
