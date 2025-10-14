@@ -1,5 +1,6 @@
 ﻿using AngleSharp;
 using AngleSharp.Dom;
+using BFWikiScrapper.Model;
 using Spectre.Console;
 
 namespace BFWikiScrapper;

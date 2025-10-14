@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using System.Text;
+using BFWikiScrapper.Enum;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 
@@ -16,7 +17,22 @@ public static class Program
         var maxConcurrency = AnsiConsole.Prompt(
             new TextPrompt<int>("Set max concurrency (threads):")
                 .DefaultValue(16)
-                .Validate(value => value is > 0 and <= 32 ? ValidationResult.Success() : ValidationResult.Error("Must be between 1-32")));
+                .Validate(value => value is > 0 and <= 32
+                    ? ValidationResult.Success()
+                    : ValidationResult.Error("Must be between 1-32")
+                )
+        );
+
+        // Select output format
+        var fileWriter = FileFormatHelper.SelectFormat();
+        var outputPath = FileFormatHelper.GenerateOutputPath(fileWriter switch
+            {
+                CsvFileWriter => FileFormat.Csv,
+                JsonFileWriter => FileFormat.Json,
+                MemoryPackFileWriter => FileFormat.MemoryPack,
+                _ => FileFormat.Csv
+            }
+        );
 
         using var scraper = new WikiScraper(new AnsiScraperLogger());
         var stopwatch = Stopwatch.StartNew();
@@ -31,44 +47,45 @@ public static class Program
                                                                          new RemainingTimeColumn(),
                                                                          new SpinnerColumn(Spinner.Known.Arc)
                                                                      )
-                                                                     .StartAsync(async ctx => await scraper.ScrapeUnitsAsync(maxConcurrency: maxConcurrency, progressCtx: ctx));
+                                                                     .StartAsync(async ctx => await scraper.ScrapeUnitsAsync(
+                                                                             maxConcurrency: maxConcurrency,
+                                                                             progressCtx: ctx
+                                                                         )
+                                                                     );
 
         stopwatch.Stop();
 
-        AnsiConsole.MarkupLine("[bold green]✅   Scraping complete![/]");
+        AnsiConsole.MarkupLine("[bold green]✅ Scraping complete![/]");
         AnsiConsole.Write(new Panel(
-            new Table()
-                .AddColumn("Metric")
-                .AddColumn("Value")
-                .AddRow("Total Units", units.Count.ToString())
-                .AddRow("Pages Discovered", pagesDiscovered.ToString())
-                .AddRow("Failed Units", failedUnits.ToString())
-                .AddRow("Duration", $"{stopwatch.Elapsed.TotalSeconds:F1}s")
-                .AddRow("Output", "brave_frontier_units.csv")
-                .Border(TableBorder.Rounded))
-            .Header("[bold cyan]Summary[/]")
-            .Border(BoxBorder.Heavy));
+                              new Table()
+                                  .AddColumn("Metric")
+                                  .AddColumn("Value")
+                                  .AddRow("Total Units", units.Count.ToString())
+                                  .AddRow("Pages Discovered", pagesDiscovered.ToString())
+                                  .AddRow("Failed Units", failedUnits.ToString())
+                                  .AddRow("Duration", $"{stopwatch.Elapsed.TotalSeconds:F1}s")
+                                  .AddRow("Output Format", fileWriter.GetType().Name.Replace("FileWriter", ""))
+                                  .AddRow("Output", outputPath)
+                                  .Border(TableBorder.Rounded)
+                          )
+                          .Header("[bold cyan]Summary[/]")
+                          .Border(BoxBorder.Heavy)
+        );
 
-        const string outputPath = "brave_frontier_units.csv";
-        await WriteCsvAsync(outputPath, units);
-    }
-
-    private static async Task WriteCsvAsync(string path, List<UnitData> units)
-    {
-        await using var writer = new StreamWriter(path);
-        await writer.WriteLineAsync("UnitID;Name;Rarity;UnitDataID;ImageUrl");
-        foreach (var unit in units)
-            await writer.WriteLineAsync($"{unit.UnitId};{unit.Name};{unit.Rarity};{unit.UnitDataId};{unit.ImageUrl}");
+        // Serialize to chosen format
+        await fileWriter.WriteAsync(outputPath, units);
+        AnsiConsole.MarkupLine($"[green]✅ Data written to {outputPath}[/]");
     }
 
     private sealed class CompletedColumn : ProgressColumn
     {
         public override IRenderable Render(RenderOptions options, ProgressTask task, TimeSpan deltaTime)
         {
-            if (task.IsIndeterminate || task.MaxValue == 0)
+            if ( task.IsIndeterminate || task.MaxValue == 0 )
             {
                 return new Text(task.Value.ToString("N0"), new Style(Color.Grey));
             }
+
             return new Text($"{task.Value:N0}/{task.MaxValue:N0}", new Style(Color.White));
         }
     }
