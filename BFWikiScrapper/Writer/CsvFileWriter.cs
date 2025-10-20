@@ -1,7 +1,7 @@
 ﻿using BFWikiScrapper.Interface;
 using BFWikiScrapper.Model;
 
-namespace BFWikiScrapper;
+namespace BFWikiScrapper.Writer;
 
 /// <summary>
 ///     CSV writer for unit data.

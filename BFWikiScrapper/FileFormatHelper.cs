@@ -1,5 +1,6 @@
 ﻿using BFWikiScrapper.Enum;
 using BFWikiScrapper.Interface;
+using BFWikiScrapper.Writer;
 using Spectre.Console;
 
 namespace BFWikiScrapper;

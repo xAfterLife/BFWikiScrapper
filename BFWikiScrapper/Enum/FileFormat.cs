@@ -5,7 +5,7 @@
 /// </summary>
 public enum FileFormat
 {
-    Csv,
-    Json,
-    MemoryPack
+    Csv = 0,
+    Json = 1,
+    MemoryPack = 2
 }

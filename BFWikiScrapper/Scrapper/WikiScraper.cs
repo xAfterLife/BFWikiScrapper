@@ -3,7 +3,7 @@ using AngleSharp.Dom;
 using BFWikiScrapper.Model;
 using Spectre.Console;
 
-namespace BFWikiScrapper;
+namespace BFWikiScrapper.Scrapper;
 
 public sealed class WikiScraper : IDisposable
 {

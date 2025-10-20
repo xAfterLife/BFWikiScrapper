@@ -2,7 +2,7 @@
 using BFWikiScrapper.Model;
 using MemoryPack;
 
-namespace BFWikiScrapper;
+namespace BFWikiScrapper.Writer;
 
 /// <summary>
 ///     MemoryPack writer for compact binary serialization of unit data.

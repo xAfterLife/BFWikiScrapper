@@ -1,14 +1,10 @@
 ﻿using System.Text.Json;
 using System.Text.Json.Serialization;
-using BFWikiScrapper.Interface;
 using BFWikiScrapper.Model;
 
 namespace BFWikiScrapper.Writer;
 
-/// <summary>
-///     JSON writer for unit data using System.Text.Json.
-/// </summary>
-public sealed class JsonFileWriter : IFileWriter
+public sealed class LevelJsonFileWriter : IFileWriter<LevelData>
 {
     private readonly static JsonSerializerOptions Options = new()
     {
@@ -19,9 +15,9 @@ public sealed class JsonFileWriter : IFileWriter
 
     public string FileExtension => ".json";
 
-    public async ValueTask WriteAsync(string filePath, List<UnitData> units, CancellationToken cancellationToken = default)
+    public async ValueTask WriteAsync(string filePath, List<LevelData> levels, CancellationToken cancellationToken = default)
     {
         await using var fileStream = File.Create(filePath);
-        await JsonSerializer.SerializeAsync(fileStream, units, Options, cancellationToken);
+        await JsonSerializer.SerializeAsync(fileStream, levels, Options, cancellationToken);
     }
 }
